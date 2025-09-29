@@ -2,7 +2,7 @@
 // Supabase Configuration
 // ===============================
 const SUPABASE_URL = "https://jinzxvyzakgdejrjqoqe.supabase.co"; 
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imppbnp4dnl6YWtnZGVqcmpxb3FlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg3MzU3MDksImV4cCI6MjA3NDMxMTcwOX0.6siGvmt5PTa_O-HkfJraS7ReVSFz2rDa6hKyH7fD_1U"; 
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imppbnp4dnl6YWtnZGVqcmpxb3FlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg3MzU3MDksImV4cCI6MjA3NDMxMTcwOX0.6siGvmt5PTa_O-HkfJraS7ReVSfz2rDa6hKyH7fD_1U"; 
 const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ===============================
@@ -43,6 +43,12 @@ function calculateCost() {
   const pricePerPage = printType.value === "bw" ? 5 : 10;
   calculatedCost = pages * copies * pricePerPage;
 
+  // ✅ Add delivery fee if selected
+  const deliveryOption = document.querySelector('input[name="deliveryOption"]:checked');
+  if (deliveryOption && deliveryOption.value === "delivery") {
+    calculatedCost += 20; 
+  }
+
   document.getElementById("costDisplay").innerText =
     `Total Cost: ₱${calculatedCost}`;
 
@@ -63,9 +69,17 @@ async function proceedToPayment(e) {
   const pages = parseInt(document.getElementById("pages").value);
   const copies = parseInt(document.getElementById("copies").value) || 1;
   const printType = document.querySelector('input[name="printType"]:checked');
+  const deliveryOption = document.querySelector('input[name="deliveryOption"]:checked');
+  const location = document.getElementById("location")?.value || "";
 
   if (!pages || !printType) {
     alert("Fill in all required fields.");
+    return;
+  }
+
+  // 🚨 Require location if delivery is chosen
+  if (deliveryOption && deliveryOption.value === "delivery" && !location.trim()) {
+    alert("Enter your location for delivery.");
     return;
   }
 
@@ -73,11 +87,10 @@ async function proceedToPayment(e) {
     calculateCost();
   }
 
-  // Generate unique job code
   generatedJobCode =
     "JOB-" + Date.now().toString(36) + "-" + Math.floor(Math.random() * 1000);
 
-  // Upload file to Supabase Storage (with upsert + error message)
+  // Upload file to Supabase Storage
   const uploadPath = `${generatedJobCode}-${uploadedFile.name}`;
   const { data: uploadData, error: uploadError } = await supabase
     .storage
@@ -92,7 +105,7 @@ async function proceedToPayment(e) {
 
   const fileUrl = `${SUPABASE_URL}/storage/v1/object/public/print-files/${uploadData.path}`;
 
-  // Insert job into database
+  // Insert job into DB
   const { error: insertError } = await supabase
     .from("jobs")
     .insert([{
@@ -103,7 +116,9 @@ async function proceedToPayment(e) {
       copies: copies,
       print_type: printType.value,
       cost: calculatedCost,
-      status: "pending"
+      status: "pending",
+      delivery_option: deliveryOption ? deliveryOption.value : "pickup",
+      location: location
     }]);
 
   if (insertError) {
@@ -114,7 +129,6 @@ async function proceedToPayment(e) {
 
   alert(`File uploaded successfully!\nYour Job Code: ${generatedJobCode}`);
 
-  // Switch to payment section
   document.getElementById("uploadSection").classList.add("hidden");
   document.getElementById("paymentSection").classList.remove("hidden");
 }
@@ -133,7 +147,6 @@ async function uploadReceipt(e) {
     return;
   }
 
-  // Upload receipt to Supabase Storage (with upsert + error message)
   const receiptPath = `${generatedJobCode}-receipt-${receiptFile.name}`;
   const { data: receiptData, error: receiptError } = await supabase
     .storage
@@ -148,7 +161,6 @@ async function uploadReceipt(e) {
 
   const receiptUrl = `${SUPABASE_URL}/storage/v1/object/public/receipts/${receiptData.path}`;
 
-  // Get job ID from jobs table
   const { data: jobData } = await supabase
     .from("jobs")
     .select("id")
@@ -160,7 +172,6 @@ async function uploadReceipt(e) {
     return;
   }
 
-  // Insert receipt into receipts table
   await supabase
     .from("receipts")
     .insert([{
@@ -168,7 +179,6 @@ async function uploadReceipt(e) {
       receipt_url: receiptUrl
     }]);
 
-  // Update job with reference number
   await supabase
     .from("jobs")
     .update({ reference_number: refNumber })
@@ -176,7 +186,6 @@ async function uploadReceipt(e) {
 
   alert("Receipt uploaded. Your transaction is pending approval.");
 
-  // Back to lookup
   document.getElementById("paymentSection").classList.add("hidden");
   document.getElementById("lookupSection").scrollIntoView({ behavior: "smooth" });
 }
@@ -195,7 +204,7 @@ async function checkStatus(e) {
 
   const { data, error } = await supabase
     .from("jobs")
-    .select("status, reference_number, release_code, created_at")
+    .select("status, reference_number, release_code, created_at, delivery_option, location")
     .eq("job_code", code)
     .single();
 
@@ -207,13 +216,24 @@ async function checkStatus(e) {
   let statusClass = "";
   if (data.status === "approved") statusClass = "status-approved";
   else if (data.status === "rejected") statusClass = "status-rejected";
+  else if (data.status === "ready for pickup") statusClass = "status-approved";
+  else if (data.status === "out for delivery") statusClass = "status-approved";
   else statusClass = "status-pending";
 
+  let statusMessage = data.status;
+  if (data.status === "ready for pickup") {
+    statusMessage = "Your print job is ready for pickup.";
+  } else if (data.status === "out for delivery") {
+    statusMessage = "Your print job is on the way!";
+  }
+
   document.getElementById("lookupResult").innerHTML = `
-    <p><strong>Status:</strong> <span class="${statusClass}">${data.status}</span></p>
+    <p><strong>Status:</strong> <span class="${statusClass}">${statusMessage}</span></p>
     <p><strong>Reference #:</strong> ${data.reference_number || "N/A"}</p>
     <p><strong>Release Code:</strong> ${data.release_code || "N/A"}</p>
     <p><strong>Created:</strong> ${new Date(data.created_at).toLocaleString()}</p>
+    <p><strong>Option:</strong> ${data.delivery_option || "pickup"}</p>
+    <p><strong>Location:</strong> ${data.location || "N/A"}</p>
   `;
 }
 
@@ -225,3 +245,29 @@ document.getElementById("calcBtn").addEventListener("click", calculateCost);
 document.getElementById("uploadForm").addEventListener("submit", proceedToPayment);
 document.getElementById("paymentForm").addEventListener("submit", uploadReceipt);
 document.getElementById("lookupForm").addEventListener("submit", checkStatus);
+
+// ===============================
+// NEW: Toggle Location Field + Auto Cost Update
+// ===============================
+const locationLabel = document.querySelector('label[for="location"]');
+const locationInput = document.getElementById("location");
+
+// hide both by default
+locationLabel.style.display = "none";
+locationInput.style.display = "none";
+
+document.querySelectorAll('input[name="deliveryOption"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    if (radio.value === "delivery" && radio.checked) {
+      locationLabel.style.display = "block";
+      locationInput.style.display = "block";
+    } else if (radio.value === "pickup" && radio.checked) {
+      locationLabel.style.display = "none";
+      locationInput.style.display = "none";
+      locationInput.value = ""; // clear when pickup
+    }
+
+    // ✅ Recalculate cost immediately when option changes
+    calculateCost();
+  });
+});
